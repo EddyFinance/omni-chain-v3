@@ -1,174 +1,122 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.7;
 
-// ███████╗██████╗░██████╗░██╗░░░██╗  ███████╗██╗███╗░░██╗░█████╗░███╗░░██╗░█████╗░███████╗
-// ██╔════╝██╔══██╗██╔══██╗╚██╗░██╔╝  ██╔════╝██║████╗░██║██╔══██╗████╗░██║██╔══██╗██╔════╝
-// █████╗░░██║░░██║██║░░██║░╚████╔╝░  █████╗░░██║██╔██╗██║███████║██╔██╗██║██║░░╚═╝█████╗░░
-// ██╔══╝░░██║░░██║██║░░██║░░╚██╔╝░░  ██╔══╝░░██║██║╚████║██╔══██║██║╚████║██║░░██╗██╔══╝░░
-// ███████╗██████╔╝██████╔╝░░░██║░░░  ██║░░░░░██║██║░╚███║██║░░██║██║░╚███║╚█████╔╝███████╗
-// ╚══════╝╚═════╝░╚═════╝░░░░╚═╝░░░  ╚═╝░░░░░╚═╝╚═╝░░╚══╝╚═╝░░╚═╝╚═╝░░╚══╝░╚════╝░╚══════╝
-
-// zeta dependencies
 import "@zetachain/protocol-contracts/contracts/zevm/SystemContract.sol";
 import "@zetachain/protocol-contracts/contracts/zevm/interfaces/zContract.sol";
-import  "@zetachain/toolkit/contracts/BytesHelperLib.sol";
+import "@zetachain/toolkit/contracts/BytesHelperLib.sol";
 import "@zetachain/toolkit/contracts/SwapHelperLib.sol";
-import  "@zetachain/protocol-contracts/contracts/zevm/interfaces/IZRC20.sol";
-import {IZRC20Metadata} from  "@zetachain/protocol-contracts/contracts/zevm/Interfaces.sol";
-
-// pyth dependencies
-import {IPyth} from "@pythnetwork/pyth-sdk-solidity/IPyth.sol";
-import {PythStructs} from "@pythnetwork/pyth-sdk-solidity/PythStructs.sol";
-
-// oz dependencies
 import "@openzeppelin/contracts/access/Ownable.sol";
+import "@zetachain/protocol-contracts/contracts/zevm/interfaces/IZRC20.sol";
+import "./interfaces/IWZETA.sol";
 
-/// @author proxima424 <https://github.com/proxima424>
-/// @author add abhishek's creds
 contract EddyTransferNativeAssets is zContract, Ownable {
-
-    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
-    /*                       CUSTOM ERRORS                        */
-    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
-    
-    /// @dev Contract call made is not from Zeta's TSS address
-    error SenderNotSystemContract(address falseCaller);
-
-    /// @dev Not enough final amount (less gas fees) to withdraw to native chain
+    error SenderNotSystemContract();
     error WrongAmount();
+    error NoPriceData();
 
-    /// @dev Input array's length not same
-    error InvalidInput();
+    event EddyCrossChainSwap(
+        address zrc20,
+        address targetZRC20,
+        uint256 amount,
+        uint256 outputAmount,
+        address walletAddress,
+        uint256 fees,
+        uint256 dollarValueOfTrade
+    );
 
-    /// @dev Invalid Price 
-    error InvalidPrice();
-
-    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
-    /*                           EVENTS                           */
-    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
-
-    /// @dev 
-    event EddyNativeTokenAssetDeposited(address indexed zrc20, uint256 indexed amount, address indexed user);
-
-    /// @dev 
-    event EddyNativeTokenAssetWithdrawn(address indexed zrc20, uint256 indexed amount, bytes indexed user);
-
-    /// @dev 
-    event EddyRewards(address indexed zrc20, uint256 indexed currentPrice, address indexed user, uint256 amount);
-
-    /// @dev
-    event FeeChanged(uint256 indexed oldBP, uint256 indexed newBP);
-
-    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
-    /*                          STORAGE                           */
-    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
-
-    /// @dev feePercentage is represented in basis points [ 1% == 100 bp ]
-    uint256 public feeCharge;
-    
-    /// @dev Instance of SystemContract used for calling Zeta's TSS Address
     SystemContract public immutable systemContract;
 
-    /// @dev Instance of Pyth Oracle Data Provider
-    IPyth public immutable pythNetwork;
-
-    /// @dev 
-    address public immutable BTC_ZRC20; //0x65a45c57636f9BcCeD4fe193A602008578BcA90b;
-
-    /// @dev 
-    mapping(address=>bytes32) addressToPriceFeed;
-
-    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
-    /*                       CONSTRUCTOR                          */
-    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+    // Testnet BTC(Zeth)
+    address public immutable BTC_ZETH = 0x65a45c57636f9BcCeD4fe193A602008578BcA90b;
+    address public immutable AZETA = 0x5F0b1a82749cb4E2278EC87F8BF6B618dC71a8bf;
+    IWZETA public immutable WZETA;
+    uint256 public platformFee;
+    mapping(address => uint256) public prices;
 
     constructor(
-        address _systemContractAddress,
-        address _BTC_ZRC20,
-        address _pythNetwork,
-        uint256 _feeCharge
-    ) Ownable() {
-        systemContract = SystemContract(_systemContractAddress);
-        pythNetwork = IPyth(_pythNetwork);
-        BTC_ZRC20 = _BTC_ZRC20;
-        feeCharge = _feeCharge;
-        emit FeeChanged(0, _feeCharge);
+        address systemContractAddress,
+        address wrappedZetaToken,
+        uint256 _platformFee
+    ) {
+        systemContract = SystemContract(systemContractAddress);
+        WZETA = IWZETA(wrappedZetaToken);
+        platformFee = _platformFee;
     }
 
-    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
-    /*                          ADMIN                             */
-    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
-
-    function initializePriceFeedId(address[] memory _zrcAddresses, bytes32[] memory _priceIds) external onlyOwner {
-        if( _zrcAddresses.length != _priceIds.length ){
-            revert InvalidInput();
-        }
-        uint256 len = _zrcAddresses.length;
-        for ( uint256 i; i<len;){
-            addressToPriceFeed[_zrcAddresses[i]] = _priceIds[i];
-            unchecked {
-                ++i;
-            }
-        }
+    function _getRecipient(bytes calldata message) internal pure returns (bytes32 recipient) {
+        address recipientAddr = BytesHelperLib.bytesToAddress(message, 0);
+        recipient = BytesHelperLib.addressToBytes(recipientAddr);
     }
 
-    /// trying something new here, emitting before state changes. 
-    /// idk why this would fail : ask 
-    function setFeeCharge(uint256 _newFeeCharge) external onlyOwner {
-        emit FeeChanged(feeCharge,_newFeeCharge);
-        feeCharge = _newFeeCharge;     
+    function updatePriceForAsset(address asset, uint256 price) external onlyOwner {
+        prices[asset] = price;
     }
 
-    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
-    /*                          CORE FUNCTIONS                    */
-    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+    function updatePlatformFee(uint256 _updatedFee) external onlyOwner {
+        platformFee = _updatedFee;
+    }
 
-    /// @notice Every SystemContract call to this function
-    /// @notice comes with an associated ZRC20 amount ( zeta does this via core ZETA Pools )
-    /// @param message : Customizable by the protocol, we embed senderEVMAddress and the zrc20 token to swap with 
-
-    function onCrossChainCall(
-        zContext calldata context,
-        address zrc20,
-        uint256 amount,
-        bytes calldata message
-    ) external virtual override {
-        if (msg.sender != address(systemContract)) {
-            revert SenderNotSystemContract(msg.sender);
+    function bytesToBech32Bytes(
+        bytes calldata data,
+        uint256 offset
+    ) internal pure returns (bytes memory) {
+        bytes memory bech32Bytes = new bytes(42);
+        for (uint i = 0; i < 42; i++) {
+            bech32Bytes[i] = data[i + offset];
         }
 
-        // Extract metadata from message 
-        address senderEvmAddress = BytesHelperLib.bytesToAddress(message, 0);
-        address targetZRC20 = BytesHelperLib.bytesToAddress(message, 20);
+        return bech32Bytes;
+    }
 
-        // Fetch zrc20 token price into currentPrice
-        bytes[] memory updateData;
-        uint256 updateFee = pythNetwork.getUpdateFee(updateData);
-        pythNetwork.updatePriceFeeds{value : updateFee}(updateData);
-        PythStructs.Price memory currentPriceStruct = pythNetwork.getPrice(addressToPriceFeed[zrc20]);
-        uint256 currentPrice = convertToUint(currentPriceStruct, IZRC20Metadata(zrc20).decimals());
-        emit EddyRewards(zrc20, currentPrice, senderEvmAddress, amount);
-        // we could also emit out the exact dollar denominated value, but can also do that offchain to save gas
+    function withdrawFromZetaToConnectedChain(
+        bytes calldata withdrawData,
+        address zrc20, // Pass WZETA address here
+        address targetZRC20
+    ) external payable {
+        // Store fee in aZeta
+        uint256 platformFeesForTx = (msg.value * platformFee) / 1000; // platformFee = 5 <> 0.5%
 
-        // need to think of rounding precision errors
-        uint256 feeToCharge = ( amount * feeCharge ) / 10000 ; 
-        
-        // same token
-        if (targetZRC20 == zrc20) {
-            IZRC20(targetZRC20).transfer(owner(), feeToCharge);
-            IZRC20(targetZRC20).transfer(senderEvmAddress, amount - feeToCharge);
+        (bool sent, ) = payable(owner()).call{value: platformFeesForTx}("");
+
+        require(sent, "Failed to transfer aZeta to owner");
+
+        WZETA.deposit{value: msg.value - platformFeesForTx}();
+
+        bool isTargetZRC20BTC_ZETH = targetZRC20 == BTC_ZETH;
+
+        uint256 uintPriceOfAsset = prices[targetZRC20];
+
+        if (uintPriceOfAsset == 0) revert NoPriceData();
+
+        uint256 dollarValueOfTrade = (msg.value * uintPriceOfAsset);
+
+        uint256 outputAmount = _swap(
+            zrc20,
+            msg.value - platformFeesForTx,
+            targetZRC20,
+            0
+        );
+
+        if (isTargetZRC20BTC_ZETH) {
+            bytes memory recipientAddressBech32 = bytesToBech32Bytes(withdrawData, 0);
+            (, uint256 gasFee) = IZRC20(targetZRC20).withdrawGasFee();
+            IZRC20(targetZRC20).approve(targetZRC20, gasFee);
+            if (outputAmount < gasFee) revert WrongAmount();
+
+            IZRC20(targetZRC20).withdraw(recipientAddressBech32, outputAmount - gasFee);
         } else {
-            // swap
-            IZRC20(zrc20).transfer(owner(),feeToCharge);
-            uint256 outputAmount = _swap(
-                    zrc20,
-                    amount - feeToCharge,
-                    targetZRC20,
-                    0
+            // EVM withdraw
+            bytes32 recipient = BytesHelperLib.addressToBytes(msg.sender);
+
+            SwapHelperLib._doWithdrawal(
+                targetZRC20,
+                outputAmount,
+                recipient
             );
-            IZRC20(targetZRC20).transfer(senderEvmAddress, outputAmount);
         }
-        emit EddyNativeTokenAssetDeposited(senderEvmAddress, amount, senderEvmAddress);
+
+        emit EddyCrossChainSwap(zrc20, targetZRC20, msg.value, msg.value - platformFeesForTx, msg.sender, platformFeesForTx, dollarValueOfTrade);
+
     }
 
     function withdrawToNativeChain(
@@ -177,54 +125,58 @@ contract EddyTransferNativeAssets is zContract, Ownable {
         address zrc20,
         address targetZRC20
     ) external {
-        bool isTargetZRC20BTC_ZRC20 = (targetZRC20 == BTC_ZRC20);
+        bool isTargetZRC20BTC_ZETH = targetZRC20 == BTC_ZETH;
         address tokenToUse = (targetZRC20 == zrc20) ? zrc20 : targetZRC20;
         uint256 amountToUse = amount;
 
         // check for approval
         uint256 allowance = IZRC20(zrc20).allowance(msg.sender, address(this));
+
         require(allowance > amount, "Not enough allowance of ZRC20 token");
 
-        IZRC20(zrc20).transferFrom(msg.sender, address(this), amount);
+        require(IZRC20(zrc20).transferFrom(msg.sender, address(this), amount), "INSUFFICIENT ALLOWANCE: TRANSFER FROM FAILED");
 
-        // need to think of rounding precision errors
-        uint256 feeToCharge = ( amount * feeCharge ) / 10000 ;
 
-        // transfer fees
-        IRZ20(zrc20).transfer(owner(), feeToCharge);
+        uint256 platformFeesForTx = (amount * platformFee) / 1000; // platformFee = 5 <> 0.5%
 
-        /// @add minimum amount quote
+        require(IZRC20(targetZRC20).transfer(owner(), platformFeesForTx), "Failed to transfer to owner()");
+
+        // Hard coding prices, Would replace when using pyth 
+        uint256 uintPriceOfAsset = prices[zrc20];
+
+        if (uintPriceOfAsset == 0) revert NoPriceData();
+
+        uint256 dollarValueOfTrade = (amount * uintPriceOfAsset);
+
         if (targetZRC20 != zrc20) {
             // swap and update the amount
             amountToUse = _swap(
                 zrc20,
-                amount-feeToCharge,
+                amount - platformFeesForTx,
                 targetZRC20,
                 0
             );
         }
 
-        // @add Eddyrewardsevent
-
-        // understand how btc withdrawal works
-        if (isTargetZRC20BTC_ZRC20) {
+        if (isTargetZRC20BTC_ZETH) {
             bytes memory recipientAddressBech32 = bytesToBech32Bytes(withdrawData, 0);
             (, uint256 gasFee) = IZRC20(tokenToUse).withdrawGasFee();
             IZRC20(tokenToUse).approve(tokenToUse, gasFee);
             if (amountToUse < gasFee) revert WrongAmount();
+
             IZRC20(tokenToUse).withdraw(recipientAddressBech32, amountToUse - gasFee);
         } else {
             // EVM withdraw
             bytes32 recipient = BytesHelperLib.addressToBytes(msg.sender);
+
             SwapHelperLib._doWithdrawal(
                 tokenToUse,
                 amountToUse,
                 recipient
             );
-
         }
 
-        emit EddyNativeTokenAssetWithdrawn(zrc20, amount, withdrawData);
+        emit EddyCrossChainSwap(zrc20, targetZRC20, amount, amountToUse, msg.sender, platformFeesForTx, dollarValueOfTrade);
     }
 
     function _swap(
@@ -248,46 +200,62 @@ contract EddyTransferNativeAssets is zContract, Ownable {
 
     }
 
+    receive() external payable {}
 
-    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
-    /*                  INTERNAL HELPER FUNCTIONS                 */
-    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+    fallback() external payable {}
 
-    function convertToUint(
-        PythStructs.Price memory price,
-        uint8 targetDecimals
-    ) private pure returns (uint256) {
-        if (price.price < 0 || price.expo > 0 || price.expo < -255) {
-            revert InvalidPrice();
+
+    function onCrossChainCall(
+        zContext calldata context,
+        address zrc20,
+        uint256 amount,
+        bytes calldata message
+    ) external virtual override {
+        if (msg.sender != address(systemContract)) {
+            revert SenderNotSystemContract();
         }
 
-        uint8 priceDecimals = uint8(uint32(-1 * price.expo));
+        address senderEvmAddress = BytesHelperLib.bytesToAddress(message, 0);
 
-        if (targetDecimals >= priceDecimals) {
-            return
-                uint(uint64(price.price)) *
-                10 ** uint32(targetDecimals - priceDecimals);
+        address targetZRC20 = BytesHelperLib.bytesToAddress(message, 20);
+
+        // Fee for platform
+        uint256 platformFeesForTx = (amount * platformFee) / 1000; // platformFee = 5 <> 0.5%
+
+        // Use safe
+        require(IZRC20(zrc20).transfer(owner(), platformFeesForTx), "Failed to transfer to owner()");
+
+        // Hard coding prices, Would replace when using pyth
+        uint256 uintPriceOfAsset = prices[zrc20];
+
+        if (uintPriceOfAsset == 0) revert NoPriceData();
+
+        uint256 dollarValueOfTrade = (amount * uintPriceOfAsset);
+
+
+        if (targetZRC20 == zrc20) {
+            // same token
+            require(IZRC20(targetZRC20).transfer(senderEvmAddress, amount - platformFeesForTx), "Failed to transfer to user wallet");
         } else {
-            return
-                uint(uint64(price.price)) /
-                10 ** uint32(priceDecimals - targetDecimals);
-        }
-    }
-
-    function _getRecipient(bytes calldata message) internal pure returns (bytes32 recipient) {
-        address recipientAddr = BytesHelperLib.bytesToAddress(message, 0);
-        recipient = BytesHelperLib.addressToBytes(recipientAddr);
-    }
-
-    function bytesToBech32Bytes(
-        bytes calldata data,
-        uint256 offset
-    ) internal pure returns (bytes memory) {
-        bytes memory bech32Bytes = new bytes(42);
-        for (uint i = 0; i < 42; i++) {
-            bech32Bytes[i] = data[i + offset];
+            // swap
+            uint256 outputAmount = _swap(
+                zrc20,
+                amount - platformFeesForTx,
+                targetZRC20,
+                0
+            );
+            if (targetZRC20 == AZETA) {
+                // withdraw WZETA to get aZeta in 1:1 ratio
+                WZETA.withdraw(outputAmount);
+                // transfer azeta
+                (bool sent, ) = payable(senderEvmAddress).call{value: outputAmount}("");
+                require(sent, "Failed to transfer aZeta");
+            } else {
+                require(IZRC20(targetZRC20).transfer(senderEvmAddress, outputAmount), "Failed to transfer to user wallet");
+            }
         }
 
-        return bech32Bytes;
-    }  
+        emit EddyCrossChainSwap(zrc20, targetZRC20, amount, amount - platformFeesForTx, senderEvmAddress, platformFeesForTx, dollarValueOfTrade);
+
+    }
 }
